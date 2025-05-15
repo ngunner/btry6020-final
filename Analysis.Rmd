@@ -1,0 +1,233 @@
+---
+title: "BTRY 6020 Final Project Analysis"
+author: "Nicholas Gunner"
+date: "2025-05-13"
+output: pdf_document
+---
+# Import Dataset & Libraries
+```{r}
+library(tidyverse)
+library(corrplot)
+library(car)
+library(glmnet)
+library(caret)
+
+# Kaggle dataset - https://www.kaggle.com/datasets/uciml/red-wine-quality-cortez-et-al-2009?resource=download
+wines <- read_csv("Data/winequality-red.csv")
+```
+
+# Exploratory Data Analysis
+
+## Summary statistics of variables
+```{r}
+summary(wines)
+```
+
+## Visualization of distributions and relationships
+```{r}
+wines %>%
+  select(where(is.numeric)) %>%
+  pivot_longer(everything(), names_to = "variable", values_to = "value") %>%
+  ggplot(aes(x = value)) +
+  geom_histogram(bins = 30, fill = "purple", color = "black") +
+  facet_wrap(~ variable, scales = "free", ncol = 3) +
+  theme_minimal()
+
+cor_matrix <- cor(wines, use = "complete.obs")
+corrplot(cor_matrix, method = "color", type = "upper", tl.cex = 0.7)
+```
+Analysis: In the histograms created above, most variables display a normal, bell-shaped curve with a few notable exceptions. Chlorides, residual sugar, sulphates, and total sulfer dioxide show right tails. It might be useful to try log-transforming these variables to compare model results. It is notable that residual sugar does not display a positive or negative correlation with quality.
+
+In the correlation plot, we can quickly identify some key variables that have an impact on quality of wines. Specifically, volatile acidity, sulphates, total sulfer dioxide, and alcohol stick out. We also notice that pH has a strong relationship with fixed acidity and citric acid, suggesting that these may be dependent variables.
+
+## Identification of missing values and outliers
+```{r}
+wines %>%
+  select(where(is.numeric)) %>%
+  pivot_longer(everything(), names_to = "variable", values_to = "value") %>%
+  ggplot(aes(y = value)) +
+  geom_boxplot(fill = "purple", color = "black") +
+  facet_wrap(~ variable, scales = "free", ncol = 3) +
+  theme_minimal()
+```
+
+Analysis: These box-plots show notable quantities of outlier points in chlorides, sulphates, and residual sugar, suggesting the potential implementation of transformation in these variables in our final model.
+
+## Data cleaning and preprocessing steps
+```{r}
+wines <- wines %>%
+  drop_na()
+```
+
+# Regression Assumptions Verification
+
+## Linearity assessment
+```{r}
+wines %>%
+  pivot_longer(-quality, names_to = "variable", values_to = "value") %>%
+  ggplot(aes(x = value, y = quality)) +
+  geom_point(alpha = 0.4) +
+  geom_smooth(method = "lm", se = FALSE, color = "blue") +
+  facet_wrap(~ variable, scales = "free", ncol = 3) +
+  theme_minimal()
+```
+Analysis: The plots produced above display further evidence that alcohol, chlorides, sulphates, total sulfer dioxide, and volatile acidity have linear relationships with wine quality. This is visually apparent by the angled blue lines within these variables as opposed to the relatively flat lines seen in the others.
+
+## Normality of residuals
+```{r}
+model <- lm(quality ~ ., data = wines)
+
+par(mfrow = c(1, 2))
+hist(residuals(model), breaks = 30, main = "Histogram of Residuals", xlab = "Residuals", col = "purple")
+qqnorm(residuals(model))
+qqline(residuals(model), col = "red")
+
+summary(model)
+```
+Analysis: Residuals are normally distributed and the normal Q-Q Plot is also acceptably normal due to the points primarily following the red line. We do see some deviation on the lower ends of the Q-Q plot but this doesn't seem too dramatic.
+
+The model summary shows high statistical significance in volatile acidity, chlorides, total sulfur dioxide, sulphates, and alcohol. This observation matches what we have gleaned from previous analysis.
+
+## Homoscedasticity (constant variance of residuals)
+```{r}
+plot(model$fitted.values, residuals(model),
+     xlab = "Fitted Values", ylab = "Residuals",
+     main = "Residuals vs Fitted Values",
+     pch = 20, col = "purple")
+abline(h = 0, lty = 2)
+```
+Analysis: The Residuals vs Fitted plot above confirms a constant variance of residuals. We can see this by the random scattering of points across values around 0.
+
+## Independence of observations
+```{r}
+acf(residuals(model), main = "ACF of Residuals")
+```
+Analysis: The ACF graph shows several lags are outside of the 95% confidence interval of coolinearity. This is likely due to the fact that several chemical measures of wine are dependent on each other such as PH and citric acid. We should be sure to consider these factors when constructing the final model.
+
+## Multicollinearity assessment
+```{r}
+vif(model)
+```
+Analysis: From the VIF report above, we can see that fixed acidity and density have high multicollinearity. Based on our analysis thus far, we can safely remove these variables from our model; they do not show significant correlation with wine quality and they are dependent with fixed acidity, pH, and alcohol. Furthermore citric acid interacts with Ph which is also a violation. free sulfur dioxide interacts with total sulfur dioxide - another independence violation. Our final model will exclude fixed acidity, density, citric acid, and free sulfur dioxide in order to respect the independence principle of linear regression.
+
+# Assumption Violation Handling
+
+## Apply appropriate transformations when assumptions are violated, document your approach to each violation, compare models before and after corrections.
+
+```{r}
+# Remove variables that violate the principle of independence. Excludes fixed acidity, density, citric acid, free sulfur dioxide.
+model_no_dependents <- lm(quality ~ `volatile acidity` + `residual sugar` + chlorides + `total sulfur dioxide` + pH + sulphates + alcohol, data = wines)
+
+# Chlorides, residual sugar, sulphates, and total sulfur dioxide show right tails. Try a model with log transformation and compare
+wines <- wines %>%
+  mutate(
+    log_chlorides = log(chlorides + 1),
+    `log residual sugar` = log(`residual sugar` + 1),
+    `log sulphates` = log(`sulphates` + 1),
+    `log total sulfur dioxide` = log(`total sulfur dioxide` + 1),
+  )
+
+model_no_dependents_logs <- lm(quality ~ `volatile acidity` + `log residual sugar` + log_chlorides + `log total sulfur dioxide` + pH + `log sulphates` + alcohol, data = wines)
+
+summary(model_no_dependents)
+summary(model_no_dependents_logs)
+
+vif(model_no_dependents)
+vif(model_no_dependents_logs)
+```
+Analysis: By excluding variables with high levels of multicollinearity (values >5), as well as variables that are known to be dependent on each other, we see much better results from our VIF test above. Furthermore, when we log-transform variables that have a long right-tail, we do not see a significant change in our model performance with R2 values hovering around .35 in either case. For simplicity, we will assume that no log-transformations are required in this analysis.
+
+# Variable Selection & Hypothesis Testing
+
+## Implement at least two different variable selection techniques
+
+1.) Bidirectional Stepwise Selection
+```{r}
+step(model_no_dependents, direction = "both")
+```
+
+2.) Lasso Regression
+```{r}
+X <- model.matrix(quality ~ `volatile acidity` + `residual sugar` + chlorides + `total sulfur dioxide` + pH + sulphates + alcohol, data = wines)[, -1]  # remove intercept
+y <- wines$quality
+
+lasso_model <- cv.glmnet(X, y, alpha = 1)
+
+coef(lasso_model, s = "lambda.min")
+```
+Analysis: The two variable selection techniques employed above (Bidirectional Stepwise Selection and Lasso Regression) automatically reduce the number coefficients suggested to have signal in the model. We will leverage the suggestions from the Bidirectional Stepwise Selection for our final model:
+
+lm(formula = quality ~ `volatile acidity` + chlorides + `total sulfur dioxide` + 
+    pH + sulphates + alcohol, data = wines)
+
+## Perform hypothesis tests on coefficients
+
+```{r}
+final_model <- lm(quality ~ `volatile acidity` + chlorides + `total sulfur dioxide` + 
+    pH + sulphates + alcohol, data = wines)
+
+summary(final_model)
+
+confint(final_model)
+```
+
+## Assess model performance with metrics (R², adjusted R², RMSE, etc.)
+```{r}
+summary(final_model)
+
+rmse <- sqrt(mean(residuals(final_model)^2))
+rmse
+```
+Analysis: In the summary of our final model above, we see that the R-squared value is 0.3572. This means that about 35.7% of variation in wine quality perceptions can be explained by this model. The Adjusted R-squared value is nearly identical at 0.3548. The model's RMSE was approximately .65 which is satisfactory for a model that predicts human perceptions (which are very subjective). A larger sample size (currently 1599 observations) might improve our ability to derive a more accurate model. All variables were statistically significant with p-scores less than 0.001.
+
+## Validate your model using appropriate cross-validation techniques
+```{r}
+train_control <- trainControl(method = "cv", number = 10)
+
+cv_model <- train(
+  quality ~ `volatile acidity` + chlorides + `total sulfur dioxide` + 
+    pH + sulphates + alcohol,
+  data = wines,
+  method = "lm",
+  trControl = train_control
+)
+
+cv_model
+```
+
+Analysis: Above, we performed a 10-fold cross-validation which yielded an RMSE of 0.6502067 and R-squared of 0.3529766. Both of these are consistent with previous results. The MAE (average absolute error) was 0.5060217 - slightly better than the RMSE score. These consistent metrics indicate a good generally useful model that is not overfitting when tested with unseen data.
+
+# Feature Impact Analysis
+
+## Quantify and interpret the impact of each feature on the target
+
+Alcohol - statistically significant positive impact on perceived wine quality. For each percent increase in Alcohol we model an increased quality score by .29209
+
+Sulphates - statistically significant positive impact on perceived wine quality. For each unit of sulfite, we see a 0.87356 increase in quality score.
+
+Volatile acidity (VA) - Statistically significant negative impact on perceived wine quality. For each unit of VA we model a decrease of -1.16746 in quality.
+
+Chlorides - Statistically significant negative impact on perceived wine quality. For each unit of chloride we model a decrease of -1.64511 in quality.
+
+## Provide confidence intervals for significant coefficients
+Below are 95% confidence intervals for the covariates used in our model:
+
+                              2.5 %       97.5 %
+(Intercept)             3.512011865  5.079451267
+`volatile acidity`     -1.235177646 -0.841211392
+chlorides              -2.783091418 -1.221476293
+`total sulfur dioxide` -0.003365439 -0.001378819
+pH                     -0.662783952 -0.207582077
+sulphates               0.672837922  1.104522390
+alcohol                 0.257700230  0.323647379
+
+## Explain the practical significance of your findings in the context of the dataset
+
+Based on this analysis, six variables have significant impact on perceived wine quality and provide practical considerations for winemakers and viticulturists. Higher levels of alcohol and sulphites, and lower levels of volatile acidity, chlorides, total sulfur dioxide, and pH lead to higher levels of perceived quality in wines.
+
+
+
+
+
+
+
